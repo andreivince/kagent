@@ -595,4 +595,3 @@ func Test_AdkApiTranslator_RMSTLS_SecretHashChangesAgentConfigHash(t *testing.T)
 	assert.NotEqual(t, preRotate, postRotate,
 		"agent config-hash must change when RMS Status.SecretHash rotates")
 }
-
