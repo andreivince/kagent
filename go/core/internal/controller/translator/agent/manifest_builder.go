@@ -28,9 +28,10 @@ type manifestContext struct {
 }
 
 type configSecretInputs struct {
-	secret  *corev1.Secret
-	volumes []corev1.Volume
-	mounts  []corev1.VolumeMount
+	secret     *corev1.Secret
+	configHash uint64
+	volumes    []corev1.Volume
+	mounts     []corev1.VolumeMount
 }
 
 type podRuntimeInputs struct {
@@ -56,7 +57,7 @@ func (a *adkApiTranslator) BuildManifest(
 	outputs := &AgentOutputs{}
 	manifestCtx := newManifestContext(agent, inputs.Deployment)
 
-	configSecret, err := a.buildConfigSecret(manifestCtx, inputs.Config, inputs.Sandbox, inputs.AgentCard)
+	configSecret, err := a.buildConfigSecret(manifestCtx, inputs.Config, inputs.Sandbox, inputs.AgentCard, inputs.SecretHashBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -71,12 +72,7 @@ func (a *adkApiTranslator) BuildManifest(
 		return nil, err
 	}
 
-	// Build the pod template with a placeholder config-hash. The real
-	// hash is computed and stamped onto each workload's pod template
-	// after plugins run (see below): a plugin that mutates the config
-	// Secret needs the hash to reflect the mutation so pods roll on the
-	// next reconcile.
-	podTemplate := buildPodTemplate(manifestCtx, podRuntime, 0)
+	podTemplate := buildPodTemplate(manifestCtx, podRuntime, configSecret.configHash)
 
 	workloadObjects, err := a.buildWorkloadObjects(ctx, manifestCtx, podTemplate)
 	if err != nil {
@@ -93,44 +89,7 @@ func (a *adkApiTranslator) BuildManifest(
 		outputs.AgentCard = *inputs.AgentCard
 	}
 
-	if err := a.runPlugins(ctx, agent, outputs); err != nil {
-		return outputs, err
-	}
-
-	// Stamp the post-plugin config-hash explicitly onto every workload
-	// object in the manifest. Walking outputs.Manifest is structural —
-	// it survives a plugin that reassigns or defensively clones the
-	// PodTemplateSpec.Annotations map, which would silently break a
-	// shared-reference scheme. New workload types only need a case in
-	// stampConfigHashOnWorkloads (or, for backend-emitted kinds, an
-	// implementation of Backend.StampPodTemplateAnnotation) for the
-	// hash to flow through.
-	configHash := computeHashFromConfigSecret(configSecret.secret, inputs.SecretHashBytes)
-	a.stampConfigHashOnWorkloads(outputs.Manifest, configHash)
-
-	return outputs, nil
-}
-
-// stampConfigHashOnWorkloads walks the translated manifest and sets the
-// kagent.dev/config-hash annotation on every workload object's pod
-// template. Deployments are stamped here directly; sandbox-backend kinds
-// delegate to the backend so this file stays independent of the
-// agent-sandbox CRD type.
-func (a *adkApiTranslator) stampConfigHashOnWorkloads(manifest []client.Object, configHash uint64) {
-	const key = "kagent.dev/config-hash"
-	value := fmt.Sprintf("%d", configHash)
-	for _, obj := range manifest {
-		if d, ok := obj.(*appsv1.Deployment); ok {
-			if d.Spec.Template.Annotations == nil {
-				d.Spec.Template.Annotations = map[string]string{}
-			}
-			d.Spec.Template.Annotations[key] = value
-			continue
-		}
-		if a.sandboxBackend != nil && a.sandboxBackend.StampPodTemplateAnnotation(obj, key, value) {
-			continue
-		}
-	}
+	return outputs, a.runPlugins(ctx, agent, outputs)
 }
 
 func newManifestContext(agent v1alpha2.AgentObject, dep *resolvedDeployment) manifestContext {
@@ -170,10 +129,12 @@ func (a *adkApiTranslator) buildConfigSecret(
 	cfg *adk.AgentConfig,
 	sandboxCfg *v1alpha2.SandboxConfig,
 	card *server.AgentCard,
+	modelConfigSecretHashBytes []byte,
 ) (*configSecretInputs, error) {
 	cfgJSON := ""
 	agentCard := ""
 	srtSettingsJSON := ""
+	var configHash uint64
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 
@@ -200,6 +161,14 @@ func (a *adkApiTranslator) buildConfigSecret(
 	}
 
 	if cfg != nil || srtSettingsJSON != "" {
+		secretData := modelConfigSecretHashBytes
+		if secretData == nil {
+			secretData = []byte{}
+		}
+		hashData := make([]byte, 0, len(secretData)+len(srtSettingsJSON))
+		hashData = append(hashData, secretData...)
+		hashData = append(hashData, srtSettingsJSON...)
+		configHash = computeConfigHash([]byte(cfgJSON), []byte(agentCard), hashData)
 		volumes = []corev1.Volume{{
 			Name: "config",
 			VolumeSource: corev1.VolumeSource{
@@ -215,47 +184,10 @@ func (a *adkApiTranslator) buildConfigSecret(
 			ObjectMeta: manifestCtx.objectMeta(),
 			StringData: buildConfigSecretData(cfgJSON, agentCard, srtSettingsJSON),
 		},
-		volumes: volumes,
-		mounts:  mounts,
+		configHash: configHash,
+		volumes:    volumes,
+		mounts:     mounts,
 	}, nil
-}
-
-// computeHashFromConfigSecret derives the kagent.dev/config-hash
-// annotation value from the agent's config Secret. Called after plugins
-// have had a chance to mutate the Secret's contents — so the hash
-// reflects what the agent pod will actually load at startup, and
-// plugin-driven mutations naturally trigger rollouts on the next
-// reconcile.
-//
-// modelConfigSecretHashBytes is the controller-resolved hash over
-// upstream credentials (API key, etc.) that aren't stored in the Secret
-// itself but still need to participate in the rollout signal. It's not
-// touched by plugins; passing it through preserves the pre/post-plugin
-// hash equivalence in the no-mutation case so existing agents don't
-// roll on this change alone.
-//
-// Returns 0 in the no-config case (matches the original gate in
-// buildConfigSecret) so pods that have no config to roll on stay
-// stable.
-func computeHashFromConfigSecret(secret *corev1.Secret, modelConfigSecretHashBytes []byte) uint64 {
-	if secret == nil {
-		return 0
-	}
-	cfgJSON := secret.StringData["config.json"]
-	agentCard := secret.StringData["agent-card.json"]
-	srtSettings := secret.StringData["srt-settings.json"]
-	if cfgJSON == "" && srtSettings == "" {
-		return 0
-	}
-
-	secretData := modelConfigSecretHashBytes
-	if secretData == nil {
-		secretData = []byte{}
-	}
-	hashData := make([]byte, 0, len(secretData)+len(srtSettings))
-	hashData = append(hashData, secretData...)
-	hashData = append(hashData, srtSettings...)
-	return computeConfigHash([]byte(cfgJSON), []byte(agentCard), hashData)
 }
 
 func buildConfigSecretData(cfgJSON, agentCard, srtSettingsJSON string) map[string]string {
