@@ -185,10 +185,15 @@ spec:
                   Use this for HTTPS upstreams that present a certificate the agent's
                   system trust store does not include (corporate CA, self-signed cert
                   on a test fixture, internal MCP gateway). Reuses the same TLSConfig
-                  type as ModelConfig.spec.tls, with identical semantics: disableVerify
-                  turns off certificate validation entirely, caCertSecretRef +
-                  caCertSecretKey point at a PEM bundle Secret in the same namespace,
-                  and disableSystemCAs trusts only the named bundle.
+                  type as ModelConfig.spec.tls — disableVerify turns off certificate
+                  validation entirely, caCertSecretRef + caCertSecretKey point at a
+                  PEM bundle Secret in the same namespace, and disableSystemCAs
+                  trusts only the named bundle.
+
+                  Note one asymmetry with ModelConfig: a spec-level XValidation rule
+                  on RemoteMCPServer rejects spec.tls when spec.url has the http://
+                  scheme (a TLS opinion contradicts a plaintext URL). ModelConfig has
+                  no equivalent rule, so a TLS block can sit alongside any baseUrl.
                 properties:
                   caCertSecretKey:
                     description: |-
