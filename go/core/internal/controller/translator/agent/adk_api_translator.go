@@ -323,7 +323,7 @@ func addTLSConfiguration(modelDeploymentData *modelDeploymentData, tlsConfig *v1
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName:  tlsConfig.CACertSecretRef,
-					DefaultMode: new(int32(0444)),
+					DefaultMode: new(int32(0444)), // Read-only for all users
 				},
 			},
 		})
@@ -364,7 +364,7 @@ func addTokenExchangeConfiguration(openai *adk.OpenAI, mdd *modelDeploymentData,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName:  spec.APIKeySecret,
-					DefaultMode: new(int32(0444)),
+					DefaultMode: new(int32(0444)), // Read-only for all users
 				},
 			},
 		})
