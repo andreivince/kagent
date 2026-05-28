@@ -37,6 +37,8 @@ const (
 )
 
 // RemoteMCPServerSpec defines the desired state of RemoteMCPServer.
+//
+// +kubebuilder:validation:XValidation:message="spec.tls must be unset when spec.url has http:// scheme: a TLS opinion contradicts a plaintext URL. Either drop spec.tls, or use https:// / a scheme-less URL.",rule="!self.url.startsWith('http://') || !has(self.tls)"
 type RemoteMCPServerSpec struct {
 	// +required
 	Description string `json:"description"`
@@ -68,10 +70,15 @@ type RemoteMCPServerSpec struct {
 	// Use this for HTTPS upstreams that present a certificate the agent's
 	// system trust store does not include (corporate CA, self-signed cert
 	// on a test fixture, internal MCP gateway). Reuses the same TLSConfig
-	// type as ModelConfig.spec.tls, with identical semantics: disableVerify
-	// turns off certificate validation entirely, caCertSecretRef +
-	// caCertSecretKey point at a PEM bundle Secret in the same namespace,
-	// and disableSystemCAs trusts only the named bundle.
+	// type as ModelConfig.spec.tls — disableVerify turns off certificate
+	// validation entirely, caCertSecretRef + caCertSecretKey point at a
+	// PEM bundle Secret in the same namespace, and disableSystemCAs
+	// trusts only the named bundle.
+	//
+	// Note one asymmetry with ModelConfig: a spec-level XValidation rule
+	// on RemoteMCPServer rejects spec.tls when spec.url has the http://
+	// scheme (a TLS opinion contradicts a plaintext URL). ModelConfig has
+	// no equivalent rule, so a TLS block can sit alongside any baseUrl.
 	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`
 }

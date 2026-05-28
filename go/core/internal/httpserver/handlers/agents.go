@@ -296,6 +296,7 @@ func (h *AgentsHandler) buildTranslator(kubeClient client.Client) agent_translat
 		nil,
 		h.ProxyURL,
 		h.SandboxBackend,
+		h.MCPEgressPlaintext,
 	)
 }
 

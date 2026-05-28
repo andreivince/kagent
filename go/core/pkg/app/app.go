@@ -134,6 +134,13 @@ type Config struct {
 	HttpServerAddr     string
 	WatchNamespaces    string
 	A2ABaseUrl         string
+
+	// MCPEgressPlaintext, when set, gates the egress URL rewrite: agent tool
+	// URLs and the controller's tool-discovery dial that point at a
+	// RemoteMCPServer are rewritten from https://host[:port] to
+	// http://host:<port-or-443> so traffic egresses in plaintext to a proxy
+	// that originates TLS upstream. Off by default;
+	MCPEgressPlaintext bool
 	Database           struct {
 		Url           string
 		UrlFile       string
@@ -188,6 +195,9 @@ func (cfg *Config) SetFlags(commandLine *flag.FlagSet) {
 
 	commandLine.StringVar(&cfg.Auth.Mode, "auth-mode", "unsecure", "Authentication mode: unsecure or trusted-proxy")
 	commandLine.StringVar(&cfg.Auth.UserIDClaim, "auth-user-id-claim", "sub", "JWT claim name for user identity")
+
+	commandLine.BoolVar(&cfg.MCPEgressPlaintext, "mcp-egress-plaintext", false,
+		"When set, rewrite RemoteMCPServer tool URLs and the controller's tool-discovery dial from https://host[:port] to http://host:<port-or-443> so MCP traffic egresses in plaintext to a TLS-originating proxy. Off by default.")
 
 	commandLine.StringVar(&agent_translator.DefaultImageConfig.Registry, "image-registry", agent_translator.DefaultImageConfig.Registry, "The registry to use for the image.")
 	commandLine.StringVar(&agent_translator.DefaultImageConfig.Tag, "image-tag", agent_translator.DefaultImageConfig.Tag, "The tag to use for the image.")
@@ -292,11 +302,6 @@ type ExtensionConfig struct {
 	AgentPlugins     []agent_translator.TranslatorPlugin
 	MCPServerPlugins []translator.MCPTranslatorPlugin
 	SandboxBackend   sandboxbackend.Backend
-
-	// RemoteMCPServerURLRewriter optionally transforms the URL the
-	// controller dials when discovering tools on a RemoteMCPServer.
-	// Nil means use the spec.URL verbatim.
-	RemoteMCPServerURLRewriter translator.RemoteMCPServerURLRewriter
 }
 
 type GetExtensionConfig func(bootstrap BootstrapConfig) (*ExtensionConfig, error)
@@ -523,6 +528,7 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		extensionCfg.AgentPlugins,
 		cfg.Proxy.URL,
 		extensionCfg.SandboxBackend,
+		cfg.MCPEgressPlaintext,
 	)
 
 	rcnclr := reconciler.NewKagentReconciler(
@@ -532,7 +538,7 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 		cfg.DefaultModelConfig,
 		watchNamespacesList,
 		extensionCfg.SandboxBackend,
-		extensionCfg.RemoteMCPServerURLRewriter,
+		cfg.MCPEgressPlaintext,
 	)
 
 	if err := (&controller.ServiceController{
@@ -678,18 +684,19 @@ func Start(getExtensionConfig GetExtensionConfig, migrationRunner MigrationRunne
 	}
 
 	httpServer, err := httpserver.NewHTTPServer(httpserver.ServerConfig{
-		Router:            router,
-		BindAddr:          cfg.HttpServerAddr,
-		KubeClient:        mgr.GetClient(),
-		A2AHandler:        a2aHandler,
-		MCPHandler:        mcpHandler,
-		WatchedNamespaces: watchNamespacesList,
-		DbClient:          dbClient,
-		Authorizer:        extensionCfg.Authorizer,
-		Authenticator:     extensionCfg.Authenticator,
-		ProxyURL:          cfg.Proxy.URL,
-		Reconciler:        rcnclr,
-		SandboxBackend:    extensionCfg.SandboxBackend,
+		Router:             router,
+		BindAddr:           cfg.HttpServerAddr,
+		KubeClient:         mgr.GetClient(),
+		A2AHandler:         a2aHandler,
+		MCPHandler:         mcpHandler,
+		WatchedNamespaces:  watchNamespacesList,
+		DbClient:           dbClient,
+		Authorizer:         extensionCfg.Authorizer,
+		Authenticator:      extensionCfg.Authenticator,
+		ProxyURL:           cfg.Proxy.URL,
+		Reconciler:         rcnclr,
+		SandboxBackend:     extensionCfg.SandboxBackend,
+		MCPEgressPlaintext: cfg.MCPEgressPlaintext,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create HTTP server")

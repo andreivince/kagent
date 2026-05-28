@@ -59,18 +59,19 @@ var defaultModelConfig = types.NamespacedName{
 
 // ServerConfig holds the configuration for the HTTP server
 type ServerConfig struct {
-	Router            *mux.Router
-	BindAddr          string
-	KubeClient        ctrl_client.Client
-	A2AHandler        a2a.A2AHandlerMux
-	MCPHandler        *mcp.MCPHandler
-	WatchedNamespaces []string
-	DbClient          dbpkg.Client
-	Authenticator     auth.AuthProvider
-	Authorizer        auth.Authorizer
-	ProxyURL          string
-	Reconciler        reconciler.KagentReconciler
-	SandboxBackend    sandboxbackend.Backend
+	Router             *mux.Router
+	BindAddr           string
+	KubeClient         ctrl_client.Client
+	A2AHandler         a2a.A2AHandlerMux
+	MCPHandler         *mcp.MCPHandler
+	WatchedNamespaces  []string
+	DbClient           dbpkg.Client
+	Authenticator      auth.AuthProvider
+	Authorizer         auth.Authorizer
+	ProxyURL           string
+	Reconciler         reconciler.KagentReconciler
+	SandboxBackend     sandboxbackend.Backend
+	MCPEgressPlaintext bool
 }
 
 // HTTPServer is the structure that manages the HTTP server
@@ -89,7 +90,7 @@ func NewHTTPServer(config ServerConfig) (*HTTPServer, error) {
 	return &HTTPServer{
 		config:        config,
 		router:        config.Router,
-		handlers:      handlers.NewHandlers(config.KubeClient, defaultModelConfig, config.DbClient, config.WatchedNamespaces, config.Authorizer, config.ProxyURL, config.Reconciler, config.SandboxBackend),
+		handlers:      handlers.NewHandlers(config.KubeClient, defaultModelConfig, config.DbClient, config.WatchedNamespaces, config.Authorizer, config.ProxyURL, config.Reconciler, config.SandboxBackend, config.MCPEgressPlaintext),
 		authenticator: config.Authenticator,
 	}, nil
 }

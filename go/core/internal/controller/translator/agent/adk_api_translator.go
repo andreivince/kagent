@@ -24,6 +24,7 @@ import (
 	"github.com/kagent-dev/kagent/go/api/v1alpha2"
 	"github.com/kagent-dev/kagent/go/core/internal/utils"
 	"github.com/kagent-dev/kagent/go/core/internal/version"
+	"github.com/kagent-dev/kagent/go/core/pkg/egress"
 	"github.com/kagent-dev/kagent/go/core/pkg/env"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
 	"github.com/kagent-dev/kagent/go/core/pkg/translator"
@@ -167,10 +168,10 @@ func getRuntimeProbeConfig(runtime v1alpha2.DeclarativeRuntime) probeConfig {
 type TranslatorPlugin = translator.TranslatorPlugin
 
 func NewAdkApiTranslator(kube client.Client, defaultModelConfig types.NamespacedName, plugins []TranslatorPlugin, globalProxyURL string, sandboxBackend sandboxbackend.Backend) AdkApiTranslator {
-	return NewAdkApiTranslatorWithWatchedNamespaces(kube, nil, defaultModelConfig, plugins, globalProxyURL, sandboxBackend)
+	return NewAdkApiTranslatorWithWatchedNamespaces(kube, nil, defaultModelConfig, plugins, globalProxyURL, sandboxBackend, false)
 }
 
-func NewAdkApiTranslatorWithWatchedNamespaces(kube client.Client, watchedNamespaces []string, defaultModelConfig types.NamespacedName, plugins []TranslatorPlugin, globalProxyURL string, sandboxBackend sandboxbackend.Backend) AdkApiTranslator {
+func NewAdkApiTranslatorWithWatchedNamespaces(kube client.Client, watchedNamespaces []string, defaultModelConfig types.NamespacedName, plugins []TranslatorPlugin, globalProxyURL string, sandboxBackend sandboxbackend.Backend, mcpEgressPlaintext bool) AdkApiTranslator {
 	return &adkApiTranslator{
 		kube:               kube,
 		watchedNamespaces:  watchedNamespaces,
@@ -178,6 +179,7 @@ func NewAdkApiTranslatorWithWatchedNamespaces(kube client.Client, watchedNamespa
 		plugins:            plugins,
 		globalProxyURL:     globalProxyURL,
 		sandboxBackend:     sandboxBackend,
+		mcpEgressPlaintext: mcpEgressPlaintext,
 	}
 }
 
@@ -188,6 +190,12 @@ type adkApiTranslator struct {
 	plugins            []TranslatorPlugin
 	globalProxyURL     string
 	sandboxBackend     sandboxbackend.Backend
+	// mcpEgressPlaintext, when true, rewrites RMS-backed tool URLs in the
+	// AgentConfig to their plaintext mesh-hop form during the config-phase
+	// (before the config-hash is computed). Mirrors the controller's tool-
+	// discovery dial rewrite at reconciler.go so the agent and the
+	// controller probe the same endpoint when the egress feature is on.
+	mcpEgressPlaintext bool
 }
 
 // GetOwnedResourceTypes returns all the resource types that may be created for an agent.
@@ -261,17 +269,18 @@ func tlsCAPaths(secretName, key string) (volumeName, mountPath, certPath string)
 // short-circuit and silently swap google-adk's default httpx client for
 // kagent's, which has the same SSL behavior but different
 // timeout/redirect defaults.
-func deriveTLSFields(tlsConfig *v1alpha2.TLSConfig) (insecureSkipVerify *bool, caCertPath *string, disableSystemCAs *bool) {
+func deriveTLSFields(tlsConfig *v1alpha2.TLSConfig) (*bool, *string, *bool) {
 	if tlsConfig.IsEmpty() {
 		return nil, nil, nil
 	}
-	insecureSkipVerify = &tlsConfig.DisableVerify
-	disableSystemCAs = &tlsConfig.DisableSystemCAs
+	insecureSkipVerify := &tlsConfig.DisableVerify
+	disableSystemCAs := &tlsConfig.DisableSystemCAs
+	var caCertPath *string
 	if tlsConfig.CACertSecretRef != "" && tlsConfig.CACertSecretKey != "" {
 		_, _, p := tlsCAPaths(tlsConfig.CACertSecretRef, tlsConfig.CACertSecretKey)
 		caCertPath = &p
 	}
-	return
+	return insecureSkipVerify, caCertPath, disableSystemCAs
 }
 
 // addTLSConfiguration mounts a CA Secret as a per-Secret read-only volume on
@@ -297,6 +306,9 @@ func addTLSConfiguration(modelDeploymentData *modelDeploymentData, tlsConfig *v1
 		return
 	}
 
+	// A CA bundle requires both the Secret name and the key within it; with
+	// either missing there is no file to mount (system-trust or disableVerify
+	// paths set neither and fall through as a no-op).
 	if tlsConfig.CACertSecretRef != "" && tlsConfig.CACertSecretKey != "" {
 		volumeName, mountPath, _ := tlsCAPaths(tlsConfig.CACertSecretRef, tlsConfig.CACertSecretKey)
 
@@ -992,9 +1004,7 @@ func (a *adkApiTranslator) translateRemoteMCPServerTarget(ctx context.Context, a
 	// the controller-resolved TLS Secret hash so callers can mix it into
 	// the agent's config hash — that's the signal that drives a rollout
 	// when the CA Secret rotates in place (same Secret name, new PEM).
-	if mdd != nil {
-		addTLSConfiguration(mdd, remoteMcpServer.Spec.TLS)
-	}
+	addTLSConfiguration(mdd, remoteMcpServer.Spec.TLS)
 	return remoteMCPServerSecretHashBytes(remoteMcpServer), nil
 }
 
@@ -1504,6 +1514,18 @@ func (a *adkApiTranslator) runPlugins(ctx context.Context, agent v1alpha2.AgentO
 		}
 	}
 	return errs
+}
+
+// applyEgressRewriteIfEnabled runs the in-line config-phase egress URL
+// rewrite when the OSS egress feature flag is on. Called before the config
+// Secret is serialized so the rewrite is captured by the config-hash and
+// rolls the pod when the flag is toggled. cfg is nil for agents with no
+// config (e.g. BYO), in which case there is nothing to rewrite.
+func (a *adkApiTranslator) applyEgressRewriteIfEnabled(ctx context.Context, agent v1alpha2.AgentObject, cfg *adk.AgentConfig) error {
+	if !a.mcpEgressPlaintext || cfg == nil {
+		return nil
+	}
+	return egress.RewriteConfigForAgent(ctx, a.kube, agent, cfg)
 }
 
 // allowPrivilegeEscalationExplicitlyFalse reports whether the security context

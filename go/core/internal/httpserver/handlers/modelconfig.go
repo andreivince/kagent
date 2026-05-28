@@ -255,18 +255,24 @@ func (h *ModelConfigHandler) HandleUpdateModelConfig(w ErrorResponseWriter, r *h
 		return
 	}
 
-	// Inline apiKey: auto-set secret refs and create/update the secret.
+	// Capture Secret names referenced by the PRE-update Spec so we can
+	// sweep companion Secrets the operator transitioned away from
+	// (e.g. renamed Spec.TLS.CACertSecretRef from ca-v1 to ca-v2).
+	oldRefs := referencedSecretNames(modelConfig.Spec)
+
+	// Inline apiKey: auto-set secret refs (the materialization happens
+	// below, after the secret writes complete).
 	if req.APIKey != nil && *req.APIKey != "" && req.Spec.APIKeySecret == "" && req.Spec.Provider != v1alpha2.ModelProviderOllama {
 		req.Spec.APIKeySecret = configName
 		req.Spec.APIKeySecretKey = fmt.Sprintf("%s_API_KEY", strings.ToUpper(string(req.Spec.Provider)))
 	}
-	modelConfig.Spec = req.Spec
-	if err := h.KubeClient.Update(r.Context(), modelConfig); err != nil {
-		log.Error(err, "Failed to update ModelConfig resource")
-		w.RespondWithError(errors.NewInternalServerError("Failed to update ModelConfig", err))
-		return
-	}
 
+	// Write secrets before flipping the Spec so a partial failure
+	// leaves the ModelConfig referencing its prior (still-valid)
+	// layout. Owner references on these Secrets bind to the existing
+	// ModelConfig UID; if the Spec Update below fails, the new
+	// Secrets become owned-but-unreferenced and are GC'd whenever
+	// the ModelConfig is eventually deleted.
 	if req.APIKey != nil && *req.APIKey != "" && req.Spec.Provider != v1alpha2.ModelProviderOllama {
 		log.V(1).Info("Updating API key secret")
 		if err := createOrUpdateSecretWithOwnerReference(
@@ -285,6 +291,34 @@ func (h *ModelConfigHandler) HandleUpdateModelConfig(w ErrorResponseWriter, r *h
 		log.Error(err, "Failed to create or update companion secrets")
 		w.RespondWithError(companionSecretAPIError(err))
 		return
+	}
+
+	modelConfig.Spec = req.Spec
+	if err := h.KubeClient.Update(r.Context(), modelConfig); err != nil {
+		log.Error(err, "Failed to update ModelConfig resource")
+		w.RespondWithError(errors.NewInternalServerError("Failed to update ModelConfig", err))
+		return
+	}
+
+	// Sweep companion Secrets the new Spec no longer references. Only
+	// touches Secrets owned by this ModelConfig — externally-managed
+	// Secrets are skipped via the OwnerRef check inside the helper.
+	// Best-effort: a failed delete is logged but does not fail the PUT
+	// (the rename succeeded; an orphan Secret is recoverable, an
+	// already-rolled-back PUT is not).
+	newRefs := referencedSecretNames(modelConfig.Spec)
+	reqNames := map[string]struct{}{}
+	for _, s := range req.Secrets {
+		reqNames[s.Name] = struct{}{}
+	}
+	for name := range oldRefs {
+		if _, kept := newRefs[name]; kept {
+			continue
+		}
+		if _, kept := reqNames[name]; kept {
+			continue
+		}
+		deleteStaleOwnedSecret(r.Context(), h.KubeClient, modelConfig, modelConfigGVK, name, log)
 	}
 
 	log.Info("Successfully updated ModelConfig")

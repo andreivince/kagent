@@ -995,28 +995,11 @@ func TestBuildRemoteMCPServerTLSConfig(t *testing.T) {
 	}
 }
 
-// stubRewriter is a test double for translator.RemoteMCPServerURLRewriter.
-// Records the call and returns the configured response, letting tests
-// verify createMcpTransport plumbs the rewriter correctly.
-type stubRewriter struct {
-	called  bool
-	gotRMS  *v1alpha2.RemoteMCPServer
-	respURL string
-	respErr error
-}
-
-func (s *stubRewriter) RewriteRemoteMCPServerURL(_ context.Context, rms *v1alpha2.RemoteMCPServer) (string, error) {
-	s.called = true
-	s.gotRMS = rms
-	return s.respURL, s.respErr
-}
-
-// TestCreateMcpTransport_URLRewriter covers the optional URL-rewriter
-// hook on the reconciler: a configured rewriter must (a) receive the
-// RemoteMCPServer, (b) supply the dial-time URL on the produced
-// transport, and (c) propagate errors. A nil rewriter must leave
-// s.Spec.URL as the dial target.
-func TestCreateMcpTransport_URLRewriter(t *testing.T) {
+// TestCreateMcpTransport_EgressPlaintext covers the gated egress rewrite on
+// the tool-discovery dial: with the gate off, s.Spec.URL is the dial target
+// verbatim; with the gate on, an https:// dial URL is rewritten to its
+// plaintext http://host:<port-or-443> form, for both Streamable HTTP and SSE.
+func TestCreateMcpTransport_EgressPlaintext(t *testing.T) {
 	scheme := clientgoscheme.Scheme
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
 
@@ -1029,9 +1012,9 @@ func TestCreateMcpTransport_URLRewriter(t *testing.T) {
 		},
 	}
 
-	t.Run("nil rewriter uses spec.URL verbatim", func(t *testing.T) {
+	t.Run("gate off uses spec.URL verbatim", func(t *testing.T) {
 		kube := fake.NewClientBuilder().WithScheme(scheme).Build()
-		r := &kagentReconciler{kube: kube, rmsURLRewriter: nil}
+		r := &kagentReconciler{kube: kube, mcpEgressPlaintext: false}
 
 		tsp, err := r.createMcpTransport(context.Background(), rms)
 		require.NoError(t, err)
@@ -1041,51 +1024,44 @@ func TestCreateMcpTransport_URLRewriter(t *testing.T) {
 		assert.Equal(t, specURL, streamable.Endpoint)
 	})
 
-	t.Run("rewriter substitutes the dial URL", func(t *testing.T) {
-		const rewrittenURL = "http://upstream.example.com:443/mcp"
-		stub := &stubRewriter{respURL: rewrittenURL}
-
+	t.Run("gate on rewrites https dial URL to plaintext", func(t *testing.T) {
 		kube := fake.NewClientBuilder().WithScheme(scheme).Build()
-		r := &kagentReconciler{kube: kube, rmsURLRewriter: stub}
+		r := &kagentReconciler{kube: kube, mcpEgressPlaintext: true}
 
 		tsp, err := r.createMcpTransport(context.Background(), rms)
 		require.NoError(t, err)
-		require.True(t, stub.called, "rewriter must be called")
-		require.NotNil(t, stub.gotRMS)
-		assert.Equal(t, "rms", stub.gotRMS.Name, "rewriter receives the RMS being dialed")
-
 		streamable, ok := tsp.(*mcp.StreamableClientTransport)
 		require.True(t, ok)
-		assert.Equal(t, rewrittenURL, streamable.Endpoint, "rewritten URL must become the dial target")
+		assert.Equal(t, "http://upstream.example.com:443/mcp", streamable.Endpoint, "https dial URL must be rewritten to plaintext")
 	})
 
-	t.Run("rewriter error propagates and aborts transport construction", func(t *testing.T) {
-		stub := &stubRewriter{respErr: assert.AnError}
-
-		kube := fake.NewClientBuilder().WithScheme(scheme).Build()
-		r := &kagentReconciler{kube: kube, rmsURLRewriter: stub}
-
-		tsp, err := r.createMcpTransport(context.Background(), rms)
-		assert.Nil(t, tsp)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "rewrite RemoteMCPServer URL")
-	})
-
-	t.Run("rewriter applies to SSE transport too", func(t *testing.T) {
-		const rewrittenURL = "http://upstream.example.com:443/sse"
-		stub := &stubRewriter{respURL: rewrittenURL}
-
+	t.Run("gate on rewrites SSE dial URL too", func(t *testing.T) {
 		sseRMS := rms.DeepCopy()
 		sseRMS.Spec.Protocol = v1alpha2.RemoteMCPServerProtocolSse
+		sseRMS.Spec.URL = "https://upstream.example.com/sse"
 
 		kube := fake.NewClientBuilder().WithScheme(scheme).Build()
-		r := &kagentReconciler{kube: kube, rmsURLRewriter: stub}
+		r := &kagentReconciler{kube: kube, mcpEgressPlaintext: true}
 
 		tsp, err := r.createMcpTransport(context.Background(), sseRMS)
 		require.NoError(t, err)
 		sse, ok := tsp.(*mcp.SSEClientTransport)
 		require.True(t, ok, "expected SSE transport when protocol is SSE")
-		assert.Equal(t, rewrittenURL, sse.Endpoint)
+		assert.Equal(t, "http://upstream.example.com:443/sse", sse.Endpoint)
+	})
+
+	t.Run("gate on rewrites scheme-less dial URL too", func(t *testing.T) {
+		schemelessRMS := rms.DeepCopy()
+		schemelessRMS.Spec.URL = "host.docker.internal:13443/mcp"
+
+		kube := fake.NewClientBuilder().WithScheme(scheme).Build()
+		r := &kagentReconciler{kube: kube, mcpEgressPlaintext: true}
+
+		tsp, err := r.createMcpTransport(context.Background(), schemelessRMS)
+		require.NoError(t, err)
+		streamable, ok := tsp.(*mcp.StreamableClientTransport)
+		require.True(t, ok)
+		assert.Equal(t, "http://host.docker.internal:13443/mcp", streamable.Endpoint, "scheme-less dial URL must be rewritten to plaintext")
 	})
 }
 

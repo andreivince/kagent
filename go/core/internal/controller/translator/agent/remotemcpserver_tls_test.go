@@ -330,6 +330,72 @@ func Test_AdkApiTranslator_RMSTLS_SharedSecretAcrossRMSs(t *testing.T) {
 // Both factories produce the same SSL behavior here but differ on
 // timeout / redirect defaults; the principle of least surprise says
 // `{}` should be indistinguishable from `nil`.
+// Test_AdkApiTranslator_RMSTLS_AbsentTLSIsNoOp asserts the symmetric case
+// to RMSTLS_EmptyTLSStructIsNoOp: an HTTPS RMS with spec.tls entirely
+// unset is admitted and behaves identically to spec.tls: {}. The CRD only
+// rejects spec.tls on http:// URLs; HTTPS with no opinion defaults to
+// system trust on the agent side.
+func Test_AdkApiTranslator_RMSTLS_AbsentTLSIsNoOp(t *testing.T) {
+	scheme := schemev1.Scheme
+	require.NoError(t, v1alpha2.AddToScheme(scheme))
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tls-test"}}
+	modelConfig := &v1alpha2.ModelConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "tls-test"},
+		Spec: v1alpha2.ModelConfigSpec{
+			Model:    "gpt-4o",
+			Provider: v1alpha2.ModelProviderOpenAI,
+		},
+	}
+	rms := &v1alpha2.RemoteMCPServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "upstream", Namespace: "tls-test"},
+		Spec: v1alpha2.RemoteMCPServerSpec{
+			Description: "Upstream with no TLS opinion",
+			URL:         "https://upstream.example.com/mcp",
+		},
+	}
+	agent := &v1alpha2.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "tls-test"},
+		Spec: v1alpha2.AgentSpec{
+			Type:        v1alpha2.AgentType_Declarative,
+			Description: "Agent",
+			Declarative: &v1alpha2.DeclarativeAgentSpec{
+				SystemMessage: "You are an agent",
+				ModelConfig:   "model",
+				Tools: []*v1alpha2.Tool{{
+					Type: v1alpha2.ToolProviderType_McpServer,
+					McpServer: &v1alpha2.McpServerTool{
+						TypedReference: v1alpha2.TypedReference{
+							Kind: "RemoteMCPServer", ApiGroup: "kagent.dev", Name: "upstream",
+						},
+					},
+				}},
+			},
+		},
+	}
+
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ns, modelConfig, rms, agent).
+		Build()
+
+	trans := translator.NewAdkApiTranslator(
+		kubeClient,
+		types.NamespacedName{Namespace: "tls-test", Name: "model"},
+		nil, "", nil,
+	)
+	outputs, err := translator.TranslateAgent(context.Background(), trans, agent)
+	require.NoError(t, err)
+
+	require.Len(t, outputs.Config.HttpTools, 1)
+	params := outputs.Config.HttpTools[0].Params
+	assert.Nil(t, params.TLSInsecureSkipVerify,
+		"Absent TLS must not emit explicit booleans on the wire")
+	assert.Nil(t, params.TLSDisableSystemCAs,
+		"Absent TLS must not emit explicit booleans on the wire")
+	assert.Nil(t, params.TLSCACertPath)
+}
+
 func Test_AdkApiTranslator_RMSTLS_EmptyTLSStructIsNoOp(t *testing.T) {
 	scheme := schemev1.Scheme
 	require.NoError(t, v1alpha2.AddToScheme(scheme))

@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-logr/logr"
 	api "github.com/kagent-dev/kagent/go/api/httpapi"
+	"github.com/kagent-dev/kagent/go/api/v1alpha2"
 	"github.com/kagent-dev/kagent/go/core/internal/httpserver/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -181,4 +182,50 @@ func isOwnedBy(secret *corev1.Secret, owner client.Object, gvk schema.GroupVersi
 		return true
 	}
 	return false
+}
+
+// referencedSecretNames returns the set of Secret names a ModelConfig
+// Spec references via known *SecretRef fields. Used by the Update
+// handler's sweep step to identify Secrets that were referenced before
+// the update but aren't after — candidates for cleanup if owned by
+// this ModelConfig. Add new fields here when ModelConfigSpec grows
+// additional Secret-ref fields so the sweep keeps up.
+func referencedSecretNames(spec v1alpha2.ModelConfigSpec) map[string]struct{} {
+	refs := map[string]struct{}{}
+	if spec.APIKeySecret != "" {
+		refs[spec.APIKeySecret] = struct{}{}
+	}
+	if spec.TLS != nil && spec.TLS.CACertSecretRef != "" {
+		refs[spec.TLS.CACertSecretRef] = struct{}{}
+	}
+	return refs
+}
+
+// deleteStaleOwnedSecret deletes a Secret in the owner's namespace if
+// it carries an OwnerReference back to this owner. External Secrets
+// (no matching OwnerRef) and Secrets owned by a different parent are
+// left alone. NotFound is treated as success; other failures are
+// logged but not returned — the caller invokes this best-effort
+// after the authoritative state change has already landed.
+func deleteStaleOwnedSecret(
+	ctx context.Context,
+	kubeClient client.Client,
+	owner client.Object,
+	gvk schema.GroupVersionKind,
+	name string,
+	log logr.Logger,
+) {
+	secret := &corev1.Secret{}
+	if err := kubeClient.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: name}, secret); err != nil {
+		if !apierrors.IsNotFound(err) {
+			log.Error(err, "failed to check stale companion secret", "name", name)
+		}
+		return
+	}
+	if !isOwnedBy(secret, owner, gvk) {
+		return
+	}
+	if err := kubeClient.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		log.Error(err, "failed to delete stale companion secret", "name", name)
+	}
 }

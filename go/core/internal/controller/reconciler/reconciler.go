@@ -17,8 +17,8 @@ import (
 	"github.com/hashicorp/go-multierror"
 	reconcilerutils "github.com/kagent-dev/kagent/go/core/internal/controller/reconciler/utils"
 	"github.com/kagent-dev/kagent/go/core/internal/controller/translator"
+	"github.com/kagent-dev/kagent/go/core/pkg/egress"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
-	pkgtranslator "github.com/kagent-dev/kagent/go/core/pkg/translator"
 	"github.com/kagent-dev/kmcp/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -94,10 +94,12 @@ type kagentReconciler struct {
 
 	sandboxBackend sandboxbackend.Backend
 
-	// rmsURLRewriter optionally transforms the URL the controller dials
-	// when discovering tools on a RemoteMCPServer. Nil means dial
-	// s.Spec.URL verbatim. See pkgtranslator.RemoteMCPServerURLRewriter.
-	rmsURLRewriter pkgtranslator.RemoteMCPServerURLRewriter
+	// mcpEgressPlaintext gates the egress URL rewrite on the tool-discovery
+	// dial: when true, createMcpTransport rewrites a RemoteMCPServer's
+	// https://host[:port] dial URL to http://host:<port-or-443> so the probe
+	// egresses in plaintext to a TLS-originating proxy. When false the dial
+	// uses s.Spec.URL verbatim. Mirrors the agent-config egress plugin.
+	mcpEgressPlaintext bool
 }
 
 func NewKagentReconciler(
@@ -107,7 +109,7 @@ func NewKagentReconciler(
 	defaultModelConfig types.NamespacedName,
 	watchedNamespaces []string,
 	sandboxBackend sandboxbackend.Backend,
-	rmsURLRewriter pkgtranslator.RemoteMCPServerURLRewriter,
+	mcpEgressPlaintext bool,
 ) KagentReconciler {
 	return &kagentReconciler{
 		adkTranslator:      adkTranslator,
@@ -116,7 +118,7 @@ func NewKagentReconciler(
 		defaultModelConfig: defaultModelConfig,
 		watchedNamespaces:  watchedNamespaces,
 		sandboxBackend:     sandboxBackend,
-		rmsURLRewriter:     rmsURLRewriter,
+		mcpEgressPlaintext: mcpEgressPlaintext,
 	}
 }
 
@@ -1092,20 +1094,16 @@ func (a *kagentReconciler) createMcpTransport(ctx context.Context, s *v1alpha2.R
 		return nil, err
 	}
 
-	// Resolve the dial-time URL. Default is s.Spec.URL; an installed
-	// rmsURLRewriter may substitute a different dial target. The
-	// rewriter controls the URL only — tlsConfig below is built from
-	// s.Spec.TLS regardless of what the rewriter returns, so rewriting
-	// http:// → https:// to a destination needing different trust
-	// roots is not supported (s.Spec.TLS would need to already be
-	// consistent with the new destination).
+	// Resolve the dial-time URL. Default is s.Spec.URL; when the egress gate
+	// is on, rewrite it to http://host:<effective-port> so the probe egresses
+	// in plaintext to a TLS-originating proxy. RewriteDialURL uses the RMS's
+	// effective (tls-aware) port, so this dial matches the agent's rewritten
+	// tool URL exactly. The rewrite touches the URL only — tlsConfig below is
+	// built from s.Spec.TLS regardless, so the operator's spec.tls must already
+	// describe the upstream the proxy originates to.
 	endpoint := s.Spec.URL
-	if a.rmsURLRewriter != nil {
-		rewritten, err := a.rmsURLRewriter.RewriteRemoteMCPServerURL(ctx, s)
-		if err != nil {
-			return nil, fmt.Errorf("failed to rewrite RemoteMCPServer URL for %s/%s: %w", s.Namespace, s.Name, err)
-		}
-		endpoint = rewritten
+	if a.mcpEgressPlaintext {
+		endpoint = egress.RewriteDialURL(s)
 	}
 
 	tlsConfig, err := a.buildRemoteMCPServerTLSConfig(ctx, s)
@@ -1143,7 +1141,7 @@ func (a *kagentReconciler) buildRemoteMCPServerTLSConfig(ctx context.Context, s 
 	}
 
 	cfg := &tls.Config{
-		InsecureSkipVerify: tlsSpec.DisableVerify, //nolint:gosec // operator-authored test-fixture escape hatch
+		InsecureSkipVerify: tlsSpec.DisableVerify, //nolint:gosec // G402: explicit user opt-in via spec.tls.disableVerify
 	}
 
 	if tlsSpec.CACertSecretRef != "" && tlsSpec.CACertSecretKey != "" {
@@ -1187,17 +1185,12 @@ func newHTTPClient(headers map[string]string, timeout time.Duration, tlsConfig *
 	var base = http.DefaultTransport
 	if tlsConfig != nil {
 		// Clone the default transport to preserve its dial/keepalive
-		// settings (proxies, dual-stack, HTTP/2) and override only the
-		// TLS config. If the default transport isn't *http.Transport
-		// (extremely unusual — only happens if something earlier swapped
-		// it out), fall back to a fresh transport so TLS still applies.
-		if t, ok := http.DefaultTransport.(*http.Transport); ok {
-			clone := t.Clone()
-			clone.TLSClientConfig = tlsConfig
-			base = clone
-		} else {
-			base = &http.Transport{TLSClientConfig: tlsConfig}
-		}
+		// settings (proxies, dual-stack, HTTP/2) and override only the TLS
+		// config. http.DefaultTransport is always a *http.Transport, so the
+		// assertion is safe.
+		clone := http.DefaultTransport.(*http.Transport).Clone()
+		clone.TLSClientConfig = tlsConfig
+		base = clone
 	}
 
 	if len(headers) == 0 {

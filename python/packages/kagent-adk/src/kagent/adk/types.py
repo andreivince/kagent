@@ -216,7 +216,13 @@ class _McpTlsMixin(BaseModel):
     def _apply_tls_to_params(self, params: Any) -> None:
         """Install a TLS-aware httpx_client_factory on the params instance
         if any TLS field is set. No-op when no TLS config was supplied so
-        the upstream google-adk default factory remains in place."""
+        the upstream google-adk default factory remains in place.
+
+        Reachability: when called from the Go controller's emitted config,
+        ``deriveTLSFields`` writes all three pointer fields whenever a
+        non-empty TLS config exists, so the all-None short-circuit below
+        only triggers for Python callers constructing this config directly
+        without TLS."""
         if (
             self.tls_insecure_skip_verify is None
             and self.tls_ca_cert_path is None

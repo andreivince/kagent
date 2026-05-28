@@ -244,6 +244,11 @@ spec:
             - description
             - url
             type: object
+            x-kubernetes-validations:
+            - message: 'spec.tls must be unset when spec.url has http:// scheme: a
+                TLS opinion contradicts a plaintext URL. Either drop spec.tls, or
+                use https:// / a scheme-less URL.'
+              rule: '!self.url.startsWith(''http://'') || !has(self.tls)'
           status:
             description: RemoteMCPServerStatus defines the observed state of RemoteMCPServer.
             properties:
