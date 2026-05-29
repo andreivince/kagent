@@ -35,6 +35,11 @@ import (
 // envtestAssetsDir returns the envtest binary dir from KUBEBUILDER_ASSETS, or
 // shells out to the `envtest-path` Makefile target. Mirrors the helper in
 // kagent-enterprise so the two test suites stay aligned.
+//
+// On a fresh checkout the Makefile target's first invocation may also run
+// `go install` for setup-envtest, mixing "go: downloading ..." chatter into
+// the captured output ahead of the actual path. Return the last non-empty
+// line so that bootstrap noise doesn't poison the binary directory string.
 func envtestAssetsDir(t *testing.T) string {
 	t.Helper()
 	if v := os.Getenv("KUBEBUILDER_ASSETS"); v != "" {
@@ -44,7 +49,14 @@ func envtestAssetsDir(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("envtest binaries not found (run `make setup-envtest` or set KUBEBUILDER_ASSETS): %s – %v", out, err)
 	}
-	return strings.TrimSpace(string(out))
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	t.Fatalf("envtest-path produced empty output")
+	return ""
 }
 
 // crdBasesDir resolves the OSS CRD-bases directory at runtime so the test
