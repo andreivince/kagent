@@ -303,7 +303,8 @@ type TLSConfig struct {
 
 	// CACertSecretKey is the key within the Secret that contains the
 	// CA certificate data (PEM-encoded). Required when CACertSecretRef
-	// is set (unless DisableVerify is true).
+	// is set — admission rejects ref-without-key regardless of
+	// DisableVerify (see the TLSConfig-level XValidation rules).
 	// +optional
 	CACertSecretKey string `json:"caCertSecretKey,omitempty"`
 

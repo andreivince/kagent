@@ -110,11 +110,9 @@ func TestRewriteDialURL(t *testing.T) {
 		{"scheme-less no port no tls defaults to 80", rms("svc.ns/mcp"), "http://svc.ns:80/mcp"},
 		// Per CRD-validated contract, spec.tls != nil signals TLS opt-in (even
 		// the empty struct {}); the previously-divergent shape (scheme-less,
-		// port-less, TLS-backed) resolves to :443 on both paths. The combos
-		// that would be contradictory (http://+tls, https://+empty/nil-tls)
-		// are rejected at admission; the runtime cases below cover both the
-		// well-formed shapes that reach it and the would-be-rejected ones
-		// (kept as defensive coverage if a webhook is bypassed).
+		// port-less, TLS-backed) resolves to :443 on both paths. Only the
+		// http://+non-nil-tls combo is admission-rejected; the http://+tls
+		// case below is kept as defensive coverage if a webhook is bypassed.
 		{"scheme-less no port + empty tls uses effective 443", rmsWith("tls-svc.example.com/mcp", &v1alpha2.TLSConfig{}), "http://tls-svc.example.com:443/mcp"},
 		{"scheme-less no port + non-empty tls uses effective 443", rmsWith("tls-svc.example.com/mcp", &v1alpha2.TLSConfig{CACertSecretRef: "ca", CACertSecretKey: "ca.crt"}), "http://tls-svc.example.com:443/mcp"},
 		{"http no port + tls (admission would reject) still upgrades", rmsWith("http://tls-svc.example.com/mcp", &v1alpha2.TLSConfig{}), "http://tls-svc.example.com:443/mcp"},
@@ -322,10 +320,10 @@ func TestEffectiveScheme(t *testing.T) {
 		{"non-empty tls + scheme-less", rmsWith("svc/mcp", nonEmptyTLS), "https"},
 		{"non-empty tls + DisableVerify only", rmsWith("svc/mcp", &v1alpha2.TLSConfig{DisableVerify: true}), "https"},
 		// Per CRD-validated contract, spec.tls != nil ⇒ TLS opt-in, even when
-		// the struct has no fields set. The combos CRD rejects (http://+tls,
-		// https://+nil-tls, https://+empty-tls) are kept as defensive runtime
-		// coverage; the runtime's safer answer is "https" whenever either
-		// signal expresses TLS intent.
+		// the struct has no fields set. Only http://+non-nil-tls is admission-
+		// rejected; the http://+tls case below is kept as defensive coverage if
+		// a webhook is bypassed. The runtime's safer answer is "https" whenever
+		// either signal expresses TLS intent.
 		{"empty tls struct + scheme-less → https (opt-in)", rmsWith("svc/mcp", &v1alpha2.TLSConfig{}), "https"},
 		{"empty tls struct + http → https (admission rejects, runtime defaults safer)", rmsWith("http://svc/mcp", &v1alpha2.TLSConfig{}), "https"},
 		{"empty tls struct + https → https", rmsWith("https://svc/mcp", &v1alpha2.TLSConfig{}), "https"},
