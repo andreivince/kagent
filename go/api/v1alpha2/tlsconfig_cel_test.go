@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -50,8 +51,8 @@ func envtestAssetsDir(t *testing.T) string {
 		t.Fatalf("envtest binaries not found (run `make setup-envtest` or set KUBEBUILDER_ASSETS): %s – %v", out, err)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" {
+	for _, raw := range slices.Backward(lines) {
+		if line := strings.TrimSpace(raw); line != "" {
 			return line
 		}
 	}
